@@ -34,7 +34,8 @@ Everything stays on your Mac. No accounts, no network, no telemetry.
 | 📋 **Everything you copy** | Text, images (screenshots included), and files/folders copied in Finder |
 | ⚡ **Global shortcut** | **⌘⇧V** opens the history from any app (configurable) |
 | ↩️ **Auto-paste** | **Enter** pastes the clip into the app you came from; **⇧Enter** just copies it |
-| 🔎 **Instant search** | Type words in any order; matches the clip's text, file names/paths, and the app it came from |
+| 🔎 **Instant search** | Type words in any order; matches the clip's text, file names/paths, the app it came from, and the text inside screenshots |
+| 🖼 **Searchable screenshots** | Text in copied images is read on your Mac with Apple's built-in text recognition (no AI service, nothing uploaded) |
 | 🗂 **Filters** | All · Text · Images · Files · Pinned (cycle with **Tab**) |
 | 📌 **Pinning** | Pinned clips stay on top and are never auto-deleted |
 | 🧳 **Files survive** | Copied files/folders are duplicated into the vault (up to a size limit), so you can paste them even after the originals are moved or deleted |
@@ -118,7 +119,8 @@ granted, Enter only copies the clip and the bottom bar shows an **Enable auto-pa
   - **Code** (shell commands, SQL, JSON, source code…): line numbers and syntax colours
   - **Link**: domain and path card, plus **Open in browser**
   - **Color** (`#rgb` / `#rrggbb`): a swatch; click HEX, RGB or HSL to copy that value
-  - **Image**: the image on a checkerboard, with size and dimensions
+  - **Image**: the image on a checkerboard, with size and dimensions, plus any text found in it
+    (**Text in image**, selectable, with **Copy text**)
   - **Files**: one card per file with its status (*Saved in vault*, *Linked · too large to copy*,
     *No longer available*) and **Show in Finder**
 - **Action bar**: where it came from, **Delete ⌘⌫**, **Pin ⌘P**, **Paste ↵**.
@@ -151,6 +153,7 @@ defaults.
   "theme": "system",
   "accent": "#c8f169",
   "menu_bar_icon": "vault",
+  "ocr": true,
   "ignore_apps": [
     "com.1password.1password",
     "com.agilebits.onepassword7",
@@ -173,6 +176,7 @@ defaults.
 | `theme` | `system` | `system` (follow macOS), `dark` or `light` |
 | `accent` | `#c8f169` | Highlight colour (hex), e.g. `#8b7cff`, `#5ee6d0`, `#ff9a62` |
 | `menu_bar_icon` | `vault` | Menu-bar glyph: `vault` (clipboard with a dial), `stack` (stacked clipboards) or `history` (clipboard with a clock) |
+| `ocr` | `true` | Read the text in copied images on-device so screenshots are searchable. Set `false` to turn it off |
 | `ignore_apps` | password managers | Bundle ids or app names. Copies made while one of these apps is in front are never recorded |
 
 Find an app's bundle id with:
@@ -183,7 +187,8 @@ osascript -e 'id of app "Notes"'
 
 ## Privacy & data
 
-- **Local only.** ClipVault makes no network connections.
+- **Local only.** ClipVault makes no network connections. Text in screenshots is recognised by
+  macOS itself (the Vision framework) on your Mac; images are never uploaded.
 - **Password managers are skipped.** Clips marked *concealed*, *transient* or *auto-generated*
   (the [nspasteboard.org](http://nspasteboard.org) convention used by 1Password, Bitwarden and
   others) are never recorded, nor is anything copied while an app in `ignore_apps` is in front.
@@ -194,7 +199,7 @@ osascript -e 'id of app "Notes"'
 ```
 ClipVault/
 ├── config.json          # settings
-├── history.db           # SQLite: clip metadata, text, search index
+├── history.db           # SQLite: clip metadata, text, text found in images, search index
 ├── images/              # <hash>.png + <hash>_thumb.png for each image clip
 └── files/               # <hash>/<n>/<name> — vault copies of copied files/folders
 ```
@@ -231,13 +236,13 @@ Deleting a clip (or **Clear unpinned**) also deletes its image and vault files.
 | `src/main.rs` | Window setup and startup |
 | `src/app.rs` | The egui UI: list, preview, keyboard handling, copy/paste back |
 | `src/store.rs` | SQLite history, image/file vault, search, pruning (+ tests) |
-| `src/watcher.rs` | Background clipboard polling and recording; shared state |
+| `src/watcher.rs` | Background clipboard polling and recording; on-device image text worker; shared state |
 | `src/hotkey.rs` | Global shortcut registration |
 | `src/tray.rs` | Menu-bar icon (three SVG glyphs, rendered with resvg) and menu |
 | `src/theme.rs` | Colours (dark/light + accent), fonts, icons, buttons and other small widgets |
 | `src/classify.rs` | Display helpers: code/link/colour detection, syntax tokens, Today/Yesterday grouping |
 | `assets/fonts/` | Geist and Geist Mono (SIL Open Font License, see `OFL.txt`) |
-| `src/platform.rs` | macOS specifics: pasteboard, frontmost app, Accessibility, key events |
+| `src/platform.rs` | macOS specifics: pasteboard, frontmost app, Accessibility, key events, text recognition |
 | `src/config.rs` | `config.json` loading and defaults |
 | `scripts/bundle-macos.sh` | Builds and ad-hoc signs `ClipVault.app` |
 

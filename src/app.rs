@@ -121,7 +121,11 @@ impl Row {
                 .chars()
                 .take(300)
                 .collect(),
-            Kind::Image => format!("Image {} × {}", clip.width, clip.height),
+            // a screenshot's first line of text says more than its size
+            Kind::Image => match clip.ocr_text.lines().map(str::trim).find(|l| !l.is_empty()) {
+                Some(line) => line.chars().take(300).collect(),
+                None => format!("Image {} × {}", clip.width, clip.height),
+            },
             Kind::Files => clip.preview.clone(),
         };
         let group = classify::group_for(clip.created_at, clip.pinned, now);
@@ -192,7 +196,10 @@ impl ClipApp {
         // Screenshots show the history as it is, so don't record anything new.
         if screenshot.is_none() {
             let ctx = cc.egui_ctx.clone();
-            watcher::spawn(cfg.clone(), dir.clone(), ctx, shared.clone());
+            watcher::spawn(cfg.clone(), dir.clone(), ctx.clone(), shared.clone());
+            if cfg.ocr {
+                watcher::spawn_ocr(cfg.clone(), dir.clone(), ctx, shared.clone());
+            }
         }
 
         let mut toast = None;
@@ -1078,11 +1085,18 @@ impl ClipApp {
                 ]
             }
             RowKind::Color => vec!["sRGB".into()],
-            RowKind::Image => vec![
-                format!("{} × {}", clip.width, clip.height),
-                "PNG".into(),
-                human_size(clip.size),
-            ],
+            RowKind::Image => {
+                let mut stats = vec![
+                    format!("{} × {}", clip.width, clip.height),
+                    "PNG".into(),
+                    human_size(clip.size),
+                ];
+                let words = clip.ocr_text.split_whitespace().count();
+                if words > 0 {
+                    stats.push(plural(words, "word", "words"));
+                }
+                stats
+            }
             RowKind::Files => vec![
                 plural(clip.files.len(), "item", "items"),
                 human_size(clip.size),
@@ -1303,7 +1317,13 @@ impl ClipApp {
         clip: &Clip,
     ) {
         let w = ui.available_width();
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(w, w * 9.0 / 16.0), Sense::hover());
+        // leave room for the recognised text below when there is some
+        let h = if clip.ocr_text.is_empty() {
+            w * 9.0 / 16.0
+        } else {
+            (w * 9.0 / 16.0).min(200.0)
+        };
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
         let p = ui.painter();
         p.rect_filled(rect, 12.0, pal.code);
         // checkerboard, so transparency is visible
@@ -1341,6 +1361,66 @@ impl ClipApp {
                 p.rect_filled(r, 7.0, pal.panel_solid);
                 p.galley(r.center() - g.size() / 2.0, g, pal.muted);
             }
+        }
+        self.image_text_ui(ui, pal, clip);
+    }
+
+    /// The text recognised in an image (on-device), with a Copy button.
+    fn image_text_ui(&mut self, ui: &mut egui::Ui, pal: &Palette, clip: &Clip) {
+        if clip.ocr_done && clip.ocr_text.is_empty() {
+            return; // no text in this image
+        }
+        ui.add_space(16.0);
+        let mut copy = false;
+        ui.horizontal(|ui| {
+            let job = egui::text::LayoutJob::single_section(
+                "TEXT IN IMAGE".into(),
+                egui::TextFormat {
+                    font_id: theme::semibold(10.5),
+                    color: pal.faint,
+                    extra_letter_spacing: 0.84,
+                    ..Default::default()
+                },
+            );
+            ui.label(job);
+            if clip.ocr_done {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    copy = theme::button(ui, pal, ButtonStyle::Outline, None, "Copy text", None)
+                        .on_hover_text("Copy the recognised text")
+                        .clicked();
+                });
+            }
+        });
+        ui.add_space(8.0);
+        if !clip.ocr_done {
+            ui.label(
+                RichText::new("Reading text on this Mac…")
+                    .font(theme::sans(12.5))
+                    .color(pal.faint),
+            );
+            return;
+        }
+        egui::Frame::new()
+            .fill(pal.code)
+            .stroke(Stroke::new(1.0, pal.line))
+            .corner_radius(12)
+            .inner_margin(14)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let mut job = egui::text::LayoutJob::single_section(
+                    clip.ocr_text.clone(),
+                    egui::TextFormat {
+                        font_id: theme::sans(13.5),
+                        color: pal.text,
+                        line_height: Some(13.5 * 1.55),
+                        ..Default::default()
+                    },
+                );
+                job.wrap.max_width = ui.available_width();
+                ui.add(egui::Label::new(job).selectable(true));
+            });
+        if copy {
+            self.copy_value("text", clip.ocr_text.clone());
         }
     }
 

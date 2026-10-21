@@ -189,6 +189,61 @@ pub fn activate_window() {
 #[cfg(not(target_os = "macos"))]
 pub fn activate_window() {}
 
+/// Read the text in an image file with Apple's on-device text recognition
+/// (Vision framework). Nothing leaves the Mac. Returns the recognised lines
+/// joined by newlines (empty if there is no text), or `None` if the image
+/// could not be processed.
+#[cfg(target_os = "macos")]
+pub fn recognize_text(path: &Path) -> Option<String> {
+    use objc2::rc::autoreleasepool;
+    use objc2::runtime::NSObjectProtocol;
+    use objc2::{sel, AllocAnyThread};
+    use objc2_foundation::{NSArray, NSDictionary, NSString, NSURL};
+    use objc2_vision::{
+        VNImageRequestHandler, VNRecognizeTextRequest, VNRequest, VNRequestTextRecognitionLevel,
+    };
+
+    let path = path.to_str()?;
+    autoreleasepool(|_| {
+        let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+        let handler = unsafe {
+            VNImageRequestHandler::initWithURL_options(
+                VNImageRequestHandler::alloc(),
+                &url,
+                &NSDictionary::new(),
+            )
+        };
+        let request = VNRecognizeTextRequest::new();
+        request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
+        request.setUsesLanguageCorrection(true);
+        // macOS 13+: recognise the image's language instead of assuming English.
+        if request.respondsToSelector(sel!(setAutomaticallyDetectsLanguage:)) {
+            request.setAutomaticallyDetectsLanguage(true);
+        }
+        let as_request: &VNRequest = &request;
+        handler
+            .performRequests_error(&NSArray::from_slice(&[as_request]))
+            .ok()?;
+        let lines: Vec<String> = request
+            .results()
+            .map(|observations| {
+                observations
+                    .iter()
+                    .filter_map(|o| o.topCandidates(1).firstObject())
+                    .map(|t| t.string().to_string())
+                    .filter(|s| !s.trim().is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(lines.join("\n"))
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn recognize_text(_path: &Path) -> Option<String> {
+    None
+}
+
 /// Open a URL in the default browser.
 pub fn open_url(url: &str) {
     #[cfg(target_os = "macos")]

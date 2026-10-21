@@ -136,6 +136,37 @@ pub fn spawn(cfg: Config, dir: PathBuf, ctx: egui::Context, shared: Arc<Shared>)
         .expect("failed to start clipboard watcher");
 }
 
+/// Background thread that reads the text in image clips (new ones as they
+/// arrive, older ones once) with on-device text recognition.
+pub fn spawn_ocr(cfg: Config, dir: PathBuf, ctx: egui::Context, shared: Arc<Shared>) {
+    std::thread::Builder::new()
+        .name("image-text".into())
+        .spawn(move || {
+            if let Err(e) = run_ocr(cfg, dir, ctx, shared) {
+                eprintln!("image text recognition stopped: {e:#}");
+            }
+        })
+        .expect("failed to start image text recognition");
+}
+
+fn run_ocr(cfg: Config, dir: PathBuf, ctx: egui::Context, shared: Arc<Shared>) -> Result<()> {
+    let store = Store::open(&dir, cfg.max_items, cfg.max_copy_mb)?;
+    loop {
+        let pending = store.pending_ocr(8)?;
+        if pending.is_empty() {
+            std::thread::sleep(Duration::from_secs(2));
+            continue;
+        }
+        for clip in pending {
+            // Images that can't be read are marked done (empty) so they aren't retried forever.
+            let text = platform::recognize_text(&store.image_path(&clip)).unwrap_or_default();
+            store.set_ocr(clip.id, text.trim())?;
+            shared.version.fetch_add(1, Ordering::Relaxed);
+            ctx.request_repaint();
+        }
+    }
+}
+
 fn run(cfg: Config, dir: PathBuf, ctx: egui::Context, shared: Arc<Shared>) -> Result<()> {
     let store = Store::open(&dir, cfg.max_items, cfg.max_copy_mb)?;
     let mut cb = arboard::Clipboard::new().map_err(|e| anyhow!("clipboard unavailable: {e}"))?;

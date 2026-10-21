@@ -31,6 +31,9 @@ pub struct Config {
     pub accent: String,
     /// Menu-bar glyph from the design: "vault" (default), "stack" or "history".
     pub menu_bar_icon: String,
+    /// Read the text in copied images on-device (Apple Vision) so screenshots
+    /// are searchable. Nothing is sent anywhere.
+    pub ocr: bool,
 }
 
 impl Default for Config {
@@ -55,6 +58,7 @@ impl Default for Config {
             theme: "system".to_string(),
             accent: "#c8f169".to_string(),
             menu_bar_icon: "vault".to_string(),
+            ocr: true,
         }
     }
 }

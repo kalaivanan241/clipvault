@@ -80,6 +80,10 @@ pub struct Clip {
     pub height: u32,
     /// Name of the app that was in front when this was copied ("" if unknown).
     pub source_app: String,
+    /// Image clips: text recognised in the image ("" if none or not read yet).
+    pub ocr_text: String,
+    /// Image clips: whether text recognition has run.
+    pub ocr_done: bool,
 }
 
 pub struct Store {
@@ -153,12 +157,19 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS clips_order ON clips (pinned DESC, created_at DESC);",
         )?;
-        // Added after the first release; older databases get it here.
-        let has_source: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('clips') WHERE name='source_app'")?
-            .exists([])?;
-        if !has_source {
-            conn.execute_batch("ALTER TABLE clips ADD COLUMN source_app TEXT NOT NULL DEFAULT ''")?;
+        // Added after the first release; older databases get them here.
+        for (column, def) in [
+            ("source_app", "TEXT NOT NULL DEFAULT ''"),
+            // text read from images on-device; ocr_state 0 = not read yet, 1 = done
+            ("ocr_text", "TEXT NOT NULL DEFAULT ''"),
+            ("ocr_state", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            let exists: bool = conn
+                .prepare("SELECT 1 FROM pragma_table_info('clips') WHERE name=?1")?
+                .exists([column])?;
+            if !exists {
+                conn.execute_batch(&format!("ALTER TABLE clips ADD COLUMN {column} {def}"))?;
+            }
         }
         Ok(Store {
             conn,
@@ -376,6 +387,8 @@ impl Store {
             width: r.get::<_, i64>("width")? as u32,
             height: r.get::<_, i64>("height")? as u32,
             source_app: r.get("source_app")?,
+            ocr_text: r.get("ocr_text")?,
+            ocr_done: r.get::<_, i64>("ocr_state")? != 0,
         })
     }
 
@@ -384,7 +397,7 @@ impl Store {
     pub fn list(&self, query: &str, filter: Filter, limit: usize) -> Result<Vec<Clip>> {
         let mut sql = String::from(
             "SELECT id, kind, hash, CASE WHEN kind='text' THEN substr(content,1,2000) ELSE content END AS content,
-                    preview, size, width, height, pinned, created_at, source_app
+                    preview, size, width, height, pinned, created_at, source_app, ocr_text, ocr_state
              FROM clips WHERE 1=1",
         );
         match filter {
@@ -433,7 +446,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, kind, hash, content, preview, size, width, height, pinned, created_at, source_app
+                "SELECT id, kind, hash, content, preview, size, width, height, pinned, created_at, source_app, ocr_text, ocr_state
                  FROM clips WHERE id=?1",
                 [id],
                 Self::row_to_clip,
@@ -475,6 +488,31 @@ impl Store {
     pub fn toggle_pin(&self, id: i64) -> Result<()> {
         self.conn
             .execute("UPDATE clips SET pinned = 1 - pinned WHERE id=?1", [id])?;
+        Ok(())
+    }
+
+    /// Image clips whose text hasn't been read yet, newest first.
+    pub fn pending_ocr(&self, limit: usize) -> Result<Vec<Clip>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, hash, content, preview, size, width, height, pinned, created_at,
+                    source_app, ocr_text, ocr_state
+             FROM clips WHERE kind='image' AND ocr_state=0
+             ORDER BY created_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map([limit as i64], Self::row_to_clip)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Store the text read from an image and make it searchable.
+    pub fn set_ocr(&self, id: i64, text: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE clips SET ocr_text=?1, ocr_state=1,
+                    search = search || ' ' || ?2
+             WHERE id=?3 AND ocr_state=0",
+            params![text, text.to_lowercase(), id],
+        )?;
         Ok(())
     }
 
@@ -652,6 +690,8 @@ mod tests {
         let clips = s.list("old", Filter::All, 10).unwrap();
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].source_app, "");
+        assert_eq!(clips[0].ocr_text, "");
+        assert!(!clips[0].ocr_done);
         fs::remove_dir_all(dir).ok();
     }
 
@@ -666,6 +706,30 @@ mod tests {
         assert!(s.thumb_path(&clip).exists());
         s.delete(id).unwrap();
         assert!(!s.image_path(&clip).exists());
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn image_text_is_searchable() {
+        let dir = tmp("ocr");
+        let s = Store::open(&dir, 10, 10).unwrap();
+        let id = s.add_image(2, 2, &[10u8; 16]).unwrap().unwrap();
+        s.add_text("unrelated").unwrap();
+        assert_eq!(s.pending_ocr(10).unwrap().len(), 1);
+        assert!(s.list("invoice", Filter::All, 10).unwrap().is_empty());
+
+        s.set_ocr(id, "Invoice #42\nTotal due").unwrap();
+        assert!(s.pending_ocr(10).unwrap().is_empty());
+        let hits = s.list("invoice total", Filter::All, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].ocr_text, "Invoice #42\nTotal due");
+        assert!(hits[0].ocr_done);
+        // running it twice doesn't append the text to the index again
+        s.set_ocr(id, "something else").unwrap();
+        assert_eq!(
+            s.get(id).unwrap().unwrap().ocr_text,
+            "Invoice #42\nTotal due"
+        );
         fs::remove_dir_all(dir).ok();
     }
 
