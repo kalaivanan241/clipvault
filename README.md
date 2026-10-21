@@ -1,5 +1,8 @@
 # ClipVault
 
+[![CI](https://github.com/kalaivanan241/clipvault/actions/workflows/ci.yml/badge.svg)](https://github.com/kalaivanan241/clipvault/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/kalaivanan241/clipvault)](https://github.com/kalaivanan241/clipvault/releases/latest)
+
 **A fast, private clipboard history manager for macOS, written in Rust.**
 
 ClipVault quietly remembers everything you copy (text, images, files and folders),
@@ -53,8 +56,22 @@ Everything stays on your Mac. No accounts, no network, no telemetry.
 
 ## Install
 
+### Download
+
+Get the latest **`.dmg`** from [Releases](https://github.com/kalaivanan241/clipvault/releases/latest)
+(one build for Apple Silicon and Intel), open it and drag **ClipVault** into **Applications**.
+
+If macOS says it can't check the app for malicious software (builds that aren't notarized by
+Apple), open **System Settings → Privacy & Security** and click **Open Anyway**, or run:
+
 ```sh
-git clone <this repo> clipvault
+xattr -dr com.apple.quarantine /Applications/ClipVault.app
+```
+
+### Build from source
+
+```sh
+git clone https://github.com/kalaivanan241/clipvault.git
 cd clipvault
 
 ./scripts/bundle-macos.sh      # builds ClipVault.app (release build, ad-hoc signed)
@@ -266,6 +283,38 @@ Run the binary from a terminal to see its log output:
 ```sh
 ./ClipVault.app/Contents/MacOS/ClipVault
 ```
+
+### Continuous integration & releases
+
+- **CI** (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `cargo clippy -D warnings` and
+  `cargo test` on macOS for every push to `main` and every pull request.
+- **Release** (`.github/workflows/release.yml`) builds a universal app (Apple Silicon + Intel),
+  packages a `.dmg` and a `.zip` with SHA-256 checksums, and publishes a GitHub Release.
+
+To publish a version:
+
+```sh
+# bump `version` in Cargo.toml first, commit, then:
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+Running **Actions → Release → Run workflow** by hand makes a test build you can download from
+the run's artifacts, without publishing a release.
+
+Without extra setup the app is signed ad hoc, so users allow it once on first launch. To sign
+with a Developer ID certificate and have Apple notarize it (opens without warnings; needs an
+Apple Developer account), add these repository secrets under **Settings → Secrets and
+variables → Actions**:
+
+| Secret | Value |
+|---|---|
+| `APPLE_CERTIFICATE_P12` | Your *Developer ID Application* certificate exported as `.p12`, base64-encoded (`base64 -i cert.p12 \| pbcopy`) |
+| `APPLE_CERTIFICATE_PASSWORD` | The password you set when exporting the `.p12` |
+| `APPLE_SIGNING_IDENTITY` | e.g. `Developer ID Application: Your Name (TEAMID)` |
+| `APPLE_ID` | Your Apple ID email |
+| `APPLE_TEAM_ID` | Your 10-character team ID |
+| `APPLE_APP_PASSWORD` | An app-specific password from [appleid.apple.com](https://appleid.apple.com) |
 
 Built with [egui/eframe](https://github.com/emilk/egui), [resvg](https://github.com/linebender/resvg), [rusqlite](https://github.com/rusqlite/rusqlite),
 [arboard](https://github.com/1Password/arboard), [global-hotkey](https://github.com/tauri-apps/global-hotkey),

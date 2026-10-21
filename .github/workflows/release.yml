@@ -1,0 +1,153 @@
+# Builds ClipVault.app (universal: Apple Silicon + Intel) and publishes it.
+#
+#   git tag v0.2.0 && git push origin v0.2.0   → GitHub Release with .dmg + .zip
+#   Actions → Release → "Run workflow"          → test build, downloadable artifact only
+#
+# Signing: without secrets the app is signed ad hoc (users must allow it once
+# in System Settings). Add these repository secrets to sign with a Developer ID
+# certificate and notarize, so it opens without warnings:
+#   APPLE_CERTIFICATE_P12       base64 of the exported .p12 (`base64 -i cert.p12 | pbcopy`)
+#   APPLE_CERTIFICATE_PASSWORD  password of that .p12
+#   APPLE_SIGNING_IDENTITY      e.g. "Developer ID Application: Your Name (TEAMID)"
+#   APPLE_ID                    Apple ID email used for notarization
+#   APPLE_TEAM_ID               10-character team id
+#   APPLE_APP_PASSWORD          app-specific password from appleid.apple.com
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Match LSMinimumSystemVersion in scripts/bundle-macos.sh.
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+jobs:
+  build:
+    name: Build & publish
+    runs-on: macos-latest
+    env:
+      HAS_SIGNING: ${{ secrets.APPLE_CERTIFICATE_P12 != '' }}
+      HAS_NOTARY: ${{ secrets.APPLE_ID != '' && secrets.APPLE_APP_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Work out the version
+        id: version
+        run: |
+          CARGO_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            if [[ "$VERSION" != "$CARGO_VERSION" ]]; then
+              echo "::warning::Tag $GITHUB_REF_NAME doesn't match Cargo.toml version $CARGO_VERSION"
+            fi
+          else
+            VERSION="$CARGO_VERSION-dev.${GITHUB_SHA::7}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building ClipVault $VERSION"
+
+      - name: Test
+        run: cargo test
+
+      - name: Build universal binary
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p target/universal
+          lipo -create -output target/universal/clipvault \
+            target/aarch64-apple-darwin/release/clipvault \
+            target/x86_64-apple-darwin/release/clipvault
+          lipo -info target/universal/clipvault
+
+      - name: Import signing certificate
+        if: env.HAS_SIGNING == 'true'
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+
+      - name: Bundle ClipVault.app
+        env:
+          BIN: target/universal/clipvault
+          VERSION: ${{ steps.version.outputs.version }}
+          SIGN_IDENTITY: ${{ env.HAS_SIGNING == 'true' && secrets.APPLE_SIGNING_IDENTITY || '-' }}
+        run: |
+          ./scripts/bundle-macos.sh
+          codesign --verify --deep --strict --verbose=2 ClipVault.app
+
+      - name: Notarize
+        if: env.HAS_SIGNING == 'true' && env.HAS_NOTARY == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          ditto -c -k --keepParent ClipVault.app "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" \
+            --wait
+          xcrun stapler staple ClipVault.app
+
+      - name: Package .zip and .dmg
+        id: package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p dist
+          ZIP="dist/ClipVault-$VERSION-macos-universal.zip"
+          DMG="dist/ClipVault-$VERSION-macos-universal.dmg"
+          ditto -c -k --keepParent ClipVault.app "$ZIP"
+          # DMG with a shortcut to /Applications for drag-to-install
+          mkdir -p "$RUNNER_TEMP/dmg"
+          cp -R ClipVault.app "$RUNNER_TEMP/dmg/"
+          ln -s /Applications "$RUNNER_TEMP/dmg/Applications"
+          hdiutil create -volname "ClipVault" -srcfolder "$RUNNER_TEMP/dmg" -ov -format UDZO "$DMG"
+          (cd dist && shasum -a 256 *.zip *.dmg > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipVault-${{ steps.version.outputs.version }}
+          path: dist/*
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ClipVault ${{ steps.version.outputs.version }}
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            1. Download **ClipVault-${{ steps.version.outputs.version }}-macos-universal.dmg** (Apple Silicon and Intel).
+            2. Open it and drag **ClipVault** into **Applications**.
+            3. Open ClipVault, then press **⌘⇧V** to show your clipboard history.
+
+            ${{ (env.HAS_SIGNING == 'true' && env.HAS_NOTARY == 'true') && 'This build is signed and notarized by Apple.' || '> **First launch:** this build is not notarized by Apple, so macOS blocks it the first time. Open **System Settings → Privacy & Security** and click **Open Anyway**, or run `xattr -dr com.apple.quarantine /Applications/ClipVault.app` in Terminal.' }}
+
+            For auto-paste, allow ClipVault under **System Settings → Privacy & Security → Accessibility** when asked.
