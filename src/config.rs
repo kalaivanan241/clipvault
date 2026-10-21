@@ -29,6 +29,8 @@ pub struct Config {
     pub theme: String,
     /// Highlight colour as hex, e.g. "#c8f169" (lime), "#8b7cff", "#5ee6d0", "#ff9a62".
     pub accent: String,
+    /// Menu-bar glyph from the design: "vault" (default), "stack" or "history".
+    pub menu_bar_icon: String,
 }
 
 impl Default for Config {
@@ -52,6 +54,7 @@ impl Default for Config {
             .to_vec(),
             theme: "system".to_string(),
             accent: "#c8f169".to_string(),
+            menu_bar_icon: "vault".to_string(),
         }
     }
 }

@@ -207,7 +207,12 @@ impl ClipApp {
 
         let hotkey_label = pretty_hotkey(&cfg.hotkey);
         #[cfg(target_os = "macos")]
-        let tray = match crate::tray::create(&hotkey_label, cc.egui_ctx.clone(), shared.clone()) {
+        let tray = match crate::tray::create(
+            crate::tray::Glyph::parse(&cfg.menu_bar_icon),
+            &hotkey_label,
+            cc.egui_ctx.clone(),
+            shared.clone(),
+        ) {
             Ok(t) => Some(t),
             Err(e) => {
                 eprintln!("{e:#}");

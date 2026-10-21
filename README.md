@@ -40,7 +40,9 @@ Everything stays on your Mac. No accounts, no network, no telemetry.
 | 🧳 **Files survive** | Copied files/folders are duplicated into the vault (up to a size limit), so you can paste them even after the originals are moved or deleted |
 | 🏷 **Source app** | Each clip shows which app it was copied from |
 | 🔐 **Privacy aware** | Skips password-manager clips and apps you choose to ignore; recording can be paused |
-| 🍎 **Menu-bar app** | No Dock icon; a menu-bar icon offers Show, Pause recording and Quit |
+| 🍎 **Menu-bar app** | No Dock icon; a menu-bar icon (three styles to pick from) offers Show, Pause recording and Quit |
+| 🎨 **Rich previews** | Code with line numbers and highlighting, links as cards, colours as swatches with HEX/RGB/HSL, images, file cards |
+| 🌗 **Dark & light** | Follows macOS, or pick one; the highlight colour is configurable |
 | 🪶 **Lightweight** | Native Rust + egui; polling reads a single counter, so it's practically idle |
 
 ## Requirements
@@ -106,16 +108,28 @@ granted, Enter only copies the clip and the bottom bar shows an **Enable auto-pa
 
 ### Window
 
-- **List** (left): newest first, pinned on top. Each row shows a preview, type, size, age and source app.
-- **Preview** (right): full text, image preview, or the list of files with their status
-  (*saved in ClipVault*, *linked to original*, or *no longer available*) and **Show in Finder**.
-- **Bottom bar**: shortcut hints, item count, **Pause/Resume**, **Clear unpinned**, **Quit**.
+- **Search** (top): type to filter; drag this area to move the window.
+- **Filters**: All · Text · Images · Files · Pinned, each with a count. **Tab** cycles them.
+- **List** (left): grouped into *Pinned*, *Today*, *Yesterday*, *This week* and *Earlier*. Each row
+  shows a type tile (or the image itself, or the colour), the first line, the source app and age,
+  and its ⌘1–9 shortcut.
+- **Preview** (right), by type:
+  - **Text**: the full text, with word and character counts
+  - **Code** (shell commands, SQL, JSON, source code…): line numbers and syntax colours
+  - **Link**: domain and path card, plus **Open in browser**
+  - **Color** (`#rgb` / `#rrggbb`): a swatch; click HEX, RGB or HSL to copy that value
+  - **Image**: the image on a checkerboard, with size and dimensions
+  - **Files**: one card per file with its status (*Saved in vault*, *Linked · too large to copy*,
+    *No longer available*) and **Show in Finder**
+- **Action bar**: where it came from, **Delete ⌘⌫**, **Pin ⌘P**, **Paste ↵**.
+- **Footer**: shortcut hints, item count, and the ⚙︎ menu (pause/resume, clear unpinned history,
+  open the settings file, quit).
 
-The window's red close button only hides it. ClipVault keeps recording in the background.
+Esc closes the window; ClipVault keeps recording in the background.
 
 ### Menu bar
 
-Click the clipboard icon in the menu bar for:
+Click the ClipVault icon in the menu bar for (the icon dims while recording is paused):
 
 - **Show ClipVault**: opens the window (handy if another app took the shortcut)
 - **Pause recording**: new copies aren't saved until you uncheck it
@@ -134,6 +148,9 @@ defaults.
   "max_copy_mb": 100,
   "poll_ms": 400,
   "auto_paste": true,
+  "theme": "system",
+  "accent": "#c8f169",
+  "menu_bar_icon": "vault",
   "ignore_apps": [
     "com.1password.1password",
     "com.agilebits.onepassword7",
@@ -153,6 +170,9 @@ defaults.
 | `max_copy_mb` | `100` | Copied files/folders up to this total size are duplicated into the vault; bigger ones are remembered by path only |
 | `poll_ms` | `400` | How often the clipboard is checked, in milliseconds (100–5000) |
 | `auto_paste` | `true` | Enter pastes into the previous app. Set `false` to only copy |
+| `theme` | `system` | `system` (follow macOS), `dark` or `light` |
+| `accent` | `#c8f169` | Highlight colour (hex), e.g. `#8b7cff`, `#5ee6d0`, `#ff9a62` |
+| `menu_bar_icon` | `vault` | Menu-bar glyph: `vault` (clipboard with a dial), `stack` (stacked clipboards) or `history` (clipboard with a clock) |
 | `ignore_apps` | password managers | Bundle ids or app names. Copies made while one of these apps is in front are never recorded |
 
 Find an app's bundle id with:
@@ -213,7 +233,10 @@ Deleting a clip (or **Clear unpinned**) also deletes its image and vault files.
 | `src/store.rs` | SQLite history, image/file vault, search, pruning (+ tests) |
 | `src/watcher.rs` | Background clipboard polling and recording; shared state |
 | `src/hotkey.rs` | Global shortcut registration |
-| `src/tray.rs` | Menu-bar icon and menu |
+| `src/tray.rs` | Menu-bar icon (three SVG glyphs, rendered with resvg) and menu |
+| `src/theme.rs` | Colours (dark/light + accent), fonts, icons, buttons and other small widgets |
+| `src/classify.rs` | Display helpers: code/link/colour detection, syntax tokens, Today/Yesterday grouping |
+| `assets/fonts/` | Geist and Geist Mono (SIL Open Font License, see `OFL.txt`) |
 | `src/platform.rs` | macOS specifics: pasteboard, frontmost app, Accessibility, key events |
 | `src/config.rs` | `config.json` loading and defaults |
 | `scripts/bundle-macos.sh` | Builds and ad-hoc signs `ClipVault.app` |
@@ -227,13 +250,19 @@ cargo clippy --all-targets
 cargo fmt
 ```
 
+Save a screenshot of the window (handy for docs; nothing new is recorded while it runs):
+
+```sh
+CLIPVAULT_SCREENSHOT=shot.png CLIPVAULT_SELECT=2 cargo run --release   # select the 3rd item
+```
+
 Run the binary from a terminal to see its log output:
 
 ```sh
 ./ClipVault.app/Contents/MacOS/ClipVault
 ```
 
-Built with [egui/eframe](https://github.com/emilk/egui), [rusqlite](https://github.com/rusqlite/rusqlite),
+Built with [egui/eframe](https://github.com/emilk/egui), [resvg](https://github.com/linebender/resvg), [rusqlite](https://github.com/rusqlite/rusqlite),
 [arboard](https://github.com/1Password/arboard), [global-hotkey](https://github.com/tauri-apps/global-hotkey),
 [tray-icon](https://github.com/tauri-apps/tray-icon) and [objc2](https://github.com/madsmtm/objc2).
 
@@ -257,8 +286,6 @@ Quit ClipVault, then delete `~/Library/Application Support/ClipVault/`.
 
 ## Known limitations
 
-- **The window may not appear when launched as `ClipVault.app`.** This is being
-  investigated; the app keeps running and recording in the background.
 - **Keyboard layouts:** auto-paste sends the key in the ⌘V position of a US (ANSI) layout. With
   Dvorak and similar layouts, use ⇧Enter and paste yourself.
 - **Very large text** (over 5 MB) is not recorded, to keep the history fast.

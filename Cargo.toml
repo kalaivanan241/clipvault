@@ -20,6 +20,7 @@ sha2 = "0.11.1"
 objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
+resvg = { version = "0.48.1", default-features = false }
 tray-icon = "0.26.1"
 
 [profile.release]
