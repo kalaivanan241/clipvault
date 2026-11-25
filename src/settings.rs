@@ -1,5 +1,5 @@
-//! The Settings window (gear icon → Settings…): edits every option in
-//! `config.json` and hands the result back to the app to save and apply
+//! The Settings window (gear icon): quick actions that apply at once, plus every
+//! option in `config.json`, handed back to the app to save and apply
 
 use crate::config::Config;
 use crate::hotkey;
@@ -19,26 +19,53 @@ const GLYPHS: [(&str, &str); 3] = [
 pub enum Outcome {
     Open,
     Cancel,
-    Save(Config),
+    Save(Saved),
     RevealFile,
+    SetPaused(bool),
+    EnableAutoPaste,
+    ClearHistory,
+}
+
+/// Live app state the quick actions show
+pub struct Status {
+    pub paused: bool,
+    pub ax_trusted: bool,
+    pub unpinned: usize,
+}
+
+pub struct Saved {
+    pub config: Config,
+    pub open_at_login: bool,
 }
 
 /// What the user is editing; only applied on Save
 pub struct Draft {
     cfg: Config,
     ignore_text: String,
+    /// Lives in the system's login items, not in `config.json`
+    open_at_login: bool,
     recording: bool,
+    confirm_clear: bool,
     pub error: Option<String>,
 }
 
 impl Draft {
-    pub fn new(cfg: &Config) -> Draft {
+    pub fn new(cfg: &Config, open_at_login: bool) -> Draft {
         Draft {
             cfg: cfg.clone(),
             ignore_text: cfg.ignore_apps.join("\n"),
+            open_at_login,
             recording: false,
+            confirm_clear: false,
             error: None,
         }
+    }
+
+    fn to_saved(&self) -> Result<Saved, String> {
+        Ok(Saved {
+            config: self.to_config()?,
+            open_at_login: self.open_at_login,
+        })
     }
 
     fn to_config(&self) -> Result<Config, String> {
@@ -59,7 +86,7 @@ impl Draft {
     }
 }
 
-pub fn show(ctx: &egui::Context, pal: &Palette, draft: &mut Draft) -> Outcome {
+pub fn show(ctx: &egui::Context, pal: &Palette, draft: &mut Draft, status: &Status) -> Outcome {
     let max_h = (ctx.content_rect().height() - 48.0).max(200.0);
     let frame = egui::Frame::NONE
         .fill(pal.panel_solid)
@@ -77,12 +104,16 @@ pub fn show(ctx: &egui::Context, pal: &Palette, draft: &mut Draft) -> Outcome {
                     .color(pal.text),
             );
             ui.add_space(8.0);
-            egui::ScrollArea::vertical()
+            let action = egui::ScrollArea::vertical()
                 .max_height(max_h - 120.0)
                 .auto_shrink([false, true])
-                .show(ui, |ui| body(ui, pal, draft));
+                .show(ui, |ui| body(ui, pal, draft, status))
+                .inner;
             ui.add_space(10.0);
-            footer(ui, pal, draft)
+            match footer(ui, pal, draft) {
+                Outcome::Open => action,
+                outcome => outcome,
+            }
         });
     // Esc while recording is consumed by the recorder, so it doesn't close the window
     let close = modal.should_close();
@@ -92,13 +123,17 @@ pub fn show(ctx: &egui::Context, pal: &Palette, draft: &mut Draft) -> Outcome {
     }
 }
 
-fn body(ui: &mut egui::Ui, pal: &Palette, draft: &mut Draft) {
+fn body(ui: &mut egui::Ui, pal: &Palette, draft: &mut Draft, status: &Status) -> Outcome {
     // Give number fields and buttons a fill so they read as editable
     let w = &mut ui.visuals_mut().widgets;
     w.inactive.weak_bg_fill = pal.elev2;
     w.inactive.bg_fill = pal.elev2;
+    let action = actions(ui, pal, draft, status);
     section(ui, pal, "General");
     row(ui, pal, "Shortcut", |ui| shortcut_ui(ui, pal, draft));
+    row(ui, pal, "Open at login", |ui| {
+        ui.checkbox(&mut draft.open_at_login, "Start ClipVault when you log in");
+    });
     row(ui, pal, "Auto-paste", |ui| {
         ui.checkbox(
             &mut draft.cfg.auto_paste,
@@ -157,6 +192,69 @@ fn body(ui: &mut egui::Ui, pal: &Palette, draft: &mut Draft) {
             note(ui, pal, "One bundle id or app name per line. Clips copied in these apps are never recorded.");
         });
     });
+    action
+}
+
+/// Show the actions that apply at once, not on Save
+fn actions(ui: &mut egui::Ui, pal: &Palette, draft: &mut Draft, status: &Status) -> Outcome {
+    let mut outcome = Outcome::Open;
+    section(ui, pal, "Right now");
+    row(ui, pal, "Recording", |ui| {
+        let mut paused = status.paused;
+        if ui
+            .checkbox(&mut paused, "Pause recording new copies")
+            .changed()
+        {
+            outcome = Outcome::SetPaused(paused);
+        }
+    });
+    row(ui, pal, "Accessibility", |ui| {
+        if status.ax_trusted {
+            note(ui, pal, "Allowed, so auto-paste can press ⌘V for you");
+        } else if ui.button("Enable auto-paste…").clicked() {
+            outcome = Outcome::EnableAutoPaste;
+        }
+    });
+    row(ui, pal, "History", |ui| {
+        if let Some(o) = clear_ui(ui, pal, draft, status.unpinned) {
+            outcome = o;
+        }
+    });
+    outcome
+}
+
+/// Confirm before clearing, so a stray click can't wipe the history
+fn clear_ui(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    draft: &mut Draft,
+    unpinned: usize,
+) -> Option<Outcome> {
+    if !draft.confirm_clear {
+        let enabled = unpinned > 0;
+        if ui
+            .add_enabled(enabled, egui::Button::new("Clear unpinned history…"))
+            .clicked()
+        {
+            draft.confirm_clear = true;
+        }
+        return None;
+    }
+    let mut outcome = None;
+    ui.vertical(|ui| {
+        let msg = format!("Delete {unpinned} unpinned clips? Pinned clips are kept.");
+        ui.label(RichText::new(msg).color(pal.text));
+        ui.horizontal(|ui| {
+            if ui.button(RichText::new("Clear").color(pal.red)).clicked() {
+                draft.confirm_clear = false;
+                outcome = Some(Outcome::ClearHistory);
+            }
+            if ui.button("Keep").clicked() {
+                draft.confirm_clear = false;
+            }
+        });
+    });
+    outcome
 }
 
 fn section(ui: &mut egui::Ui, pal: &Palette, title: &str) {
@@ -326,12 +424,12 @@ fn footer(ui: &mut egui::Ui, pal: &Palette, draft: &mut Draft) -> Outcome {
             outcome = Outcome::RevealFile;
         }
         if theme::button(ui, pal, ButtonStyle::Ghost, None, "Reset to defaults", None).clicked() {
-            *draft = Draft::new(&Config::default());
+            *draft = Draft::new(&Config::default(), false);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if theme::button(ui, pal, ButtonStyle::Primary, None, "Save", None).clicked() {
-                match draft.to_config() {
-                    Ok(cfg) => outcome = Outcome::Save(cfg),
+                match draft.to_saved() {
+                    Ok(saved) => outcome = Outcome::Save(saved),
                     Err(e) => draft.error = Some(e),
                 }
             }
@@ -364,7 +462,7 @@ mod tests {
 
     #[test]
     fn draft_cleans_up_ignored_apps_and_rejects_bad_shortcuts() {
-        let mut d = Draft::new(&Config::default());
+        let mut d = Draft::new(&Config::default(), false);
         d.ignore_text = "  Foo \n\n com.bar ".to_string();
         assert_eq!(d.to_config().unwrap().ignore_apps, ["Foo", "com.bar"]);
         d.cfg.hotkey = "cmd+shift+nope".to_string();
