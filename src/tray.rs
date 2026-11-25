@@ -127,12 +127,33 @@ fn render(glyph: Glyph, opacity: f32) -> Result<Icon> {
 
 pub struct Tray {
     icon: TrayIcon,
+    show: MenuItem,
     pause: CheckMenuItem,
     glyph: Glyph,
     shown_paused: Cell<bool>,
 }
 
+fn show_label(hotkey_label: &str) -> String {
+    format!("Show ClipVault   {hotkey_label}")
+}
+
 impl Tray {
+    /// Switch the menu-bar glyph (from the Settings window). Main thread only
+    pub fn set_glyph(&mut self, glyph: Glyph) {
+        if self.glyph == glyph {
+            return;
+        }
+        self.glyph = glyph;
+        let opacity = if self.shown_paused.get() { 0.4 } else { 1.0 };
+        if let Ok(icon) = render(glyph, opacity) {
+            let _ = self.icon.set_icon_templated(Some(icon));
+        }
+    }
+
+    pub fn set_hotkey_label(&self, hotkey_label: &str) {
+        self.show.set_text(show_label(hotkey_label));
+    }
+
     /// Keep the menu's check mark and the icon in step with pausing (from
     /// the window or the menu). Main thread only.
     pub fn sync_paused(&self, paused: bool) {
@@ -163,7 +184,7 @@ pub fn create(
     ctx: egui::Context,
     shared: Arc<Shared>,
 ) -> Result<Tray> {
-    let show = MenuItem::new(format!("Show ClipVault   {hotkey_label}"), true, None);
+    let show = MenuItem::new(show_label(hotkey_label), true, None);
     let pause = CheckMenuItem::new("Pause recording", true, false, None);
     let quit = MenuItem::new("Quit ClipVault", true, None);
     let menu = Menu::new();
@@ -192,6 +213,7 @@ pub fn create(
     }));
     Ok(Tray {
         icon,
+        show,
         pause,
         glyph,
         shown_paused: Cell::new(false),

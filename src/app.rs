@@ -3,11 +3,12 @@
 //! the "History window" design mockup.
 
 use crate::classify::{self, Group, TextKind, Tok};
-use crate::config::Config;
+use crate::config::{self, Config};
+use crate::settings::{self, Draft, Outcome, Saved, Status};
 use crate::store::{now_ms, Clip, FileEntry, Filter, Kind, Store};
 use crate::theme::{self, alpha, ButtonStyle, Icon, Palette};
 use crate::watcher::{self, Shared};
-use crate::{hotkey, platform};
+use crate::{hotkey, login, platform};
 use anyhow::{anyhow, Result};
 use eframe::egui::{
     self, Color32, Key, Modifiers, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextureHandle,
@@ -147,14 +148,19 @@ pub struct ClipApp {
     store: Store,
     shared: Arc<Shared>,
     clipboard: arboard::Clipboard,
-    _hotkey: Option<global_hotkey::GlobalHotKeyManager>,
+    hotkey: Option<hotkey::Hotkey>,
     #[cfg(target_os = "macos")]
     tray: Option<crate::tray::Tray>,
     hotkey_label: String,
     auto_paste: bool,
     /// Accessibility permission (needed for auto-paste), re-checked on show.
     ax_trusted: bool,
+    dir: PathBuf,
     config_path: PathBuf,
+    /// Open while the Settings window is showing
+    settings: Option<Draft>,
+    /// Open while the quit confirm is showing
+    confirm_quit: bool,
 
     theme_pref: String,
     accent: Color32,
@@ -191,20 +197,24 @@ impl ClipApp {
     fn build(cc: &eframe::CreationContext<'_>, dir: PathBuf, cfg: Config) -> Result<ClipApp> {
         theme::install_fonts(&cc.egui_ctx);
         let store = Store::open(&dir, cfg.max_items, cfg.max_copy_mb)?;
-        let shared = Shared::new();
+        let shared = Shared::new(cfg.clone());
         let screenshot = std::env::var_os("CLIPVAULT_SCREENSHOT").map(|p| (PathBuf::from(p), 0));
         // Screenshots show the history as it is, so don't record anything new.
         if screenshot.is_none() {
             let ctx = cc.egui_ctx.clone();
-            watcher::spawn(cfg.clone(), dir.clone(), ctx.clone(), shared.clone());
-            if cfg.ocr {
-                watcher::spawn_ocr(cfg.clone(), dir.clone(), ctx, shared.clone());
-            }
+            watcher::spawn(dir.clone(), ctx.clone(), shared.clone());
+            watcher::spawn_ocr(dir.clone(), ctx, shared.clone());
         }
 
         let mut toast = None;
-        let hotkey = match hotkey::register(&cfg.hotkey, cc.egui_ctx.clone(), shared.clone()) {
-            Ok(m) => Some(m),
+        let hotkey = match hotkey::Hotkey::new(cc.egui_ctx.clone(), shared.clone()) {
+            Ok(mut h) => {
+                if let Err(e) = h.set(&cfg.hotkey) {
+                    eprintln!("{e:#}");
+                    toast = Some((Toast::Warn(format!("{e}")), Instant::now()));
+                }
+                Some(h)
+            }
             Err(e) => {
                 eprintln!("{e:#}");
                 toast = Some((Toast::Warn(format!("{e}")), Instant::now()));
@@ -236,13 +246,16 @@ impl ClipApp {
             store,
             shared,
             clipboard,
-            _hotkey: hotkey,
+            hotkey,
             #[cfg(target_os = "macos")]
             tray,
             hotkey_label,
             auto_paste: cfg.auto_paste,
             ax_trusted: platform::accessibility_trusted(false),
             config_path: dir.join("config.json"),
+            dir,
+            settings: None,
+            confirm_quit: false,
             theme_pref: cfg.theme.to_lowercase(),
             accent: theme::parse_accent(&cfg.accent),
             applied_dark: None,
@@ -297,6 +310,141 @@ impl ClipApp {
             self.applied_dark = Some(dark);
         }
         pal
+    }
+
+    // ---------- settings ----------
+
+    fn settings_ui(&mut self, ctx: &egui::Context, pal: &Palette) {
+        let status = Status {
+            paused: self.shared.paused.load(Ordering::Relaxed),
+            ax_trusted: self.ax_trusted,
+            unpinned: self.counts[0].saturating_sub(self.counts[4]),
+        };
+        let Some(draft) = self.settings.as_mut() else {
+            return;
+        };
+        match settings::show(ctx, pal, draft, &status) {
+            Outcome::Open => {}
+            Outcome::Cancel => self.settings = None,
+            Outcome::RevealFile => platform::reveal(&self.config_path),
+            Outcome::SetPaused(paused) => self.set_paused(paused),
+            Outcome::EnableAutoPaste => self.ax_trusted = platform::accessibility_trusted(true),
+            Outcome::ClearHistory => {
+                match self.store.clear_unpinned() {
+                    Ok(()) => self.done("Cleared history. Pinned items kept."),
+                    Err(e) => self.warn(format!("Could not clear history: {e}")),
+                }
+                self.reload = true;
+            }
+            Outcome::Save(saved) => match self.apply_settings(saved) {
+                Ok(()) => {
+                    self.settings = None;
+                    self.done("Settings saved");
+                }
+                Err(e) => {
+                    if let Some(d) = self.settings.as_mut() {
+                        d.error = Some(e);
+                    }
+                }
+            },
+        }
+    }
+
+    fn open_settings(&mut self) {
+        self.ax_trusted = platform::accessibility_trusted(false);
+        self.settings = Some(Draft::new(&self.shared.config(), login::is_enabled()));
+    }
+
+    fn quit_ui(&mut self, ctx: &egui::Context, pal: &Palette) {
+        if !self.confirm_quit {
+            return;
+        }
+        let frame = egui::Frame::NONE
+            .fill(pal.panel_solid)
+            .stroke(Stroke::new(1.0, pal.line))
+            .corner_radius(12.0)
+            .inner_margin(20.0);
+        let modal = egui::Modal::new(egui::Id::unique("confirm-quit"))
+            .frame(frame)
+            .show(ctx, |ui| {
+                ui.set_width(320.0);
+                ui.label(
+                    RichText::new("Quit ClipVault?")
+                        .font(theme::semibold(16.0))
+                        .color(pal.text),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("Nothing you copy is saved until you open it again.")
+                        .font(theme::sans(13.0))
+                        .color(pal.muted),
+                );
+                ui.add_space(14.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let quit = theme::button(ui, pal, ButtonStyle::Primary, None, "Quit", None);
+                    let cancel = theme::button(ui, pal, ButtonStyle::Outline, None, "Cancel", None);
+                    (quit.clicked(), cancel.clicked())
+                })
+                .inner
+            });
+        let (quit, cancel) = modal.inner;
+        if quit {
+            self.quitting = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if quit || cancel || modal.should_close() {
+            self.confirm_quit = false;
+        }
+    }
+
+    /// Save to `config.json` and apply right away; nothing changes on error
+    fn apply_settings(&mut self, saved: Saved) -> Result<(), String> {
+        self.commit_settings(&saved)?;
+        let cfg = saved.config;
+        self.hotkey_label = pretty_hotkey(&cfg.hotkey);
+        self.auto_paste = cfg.auto_paste;
+        self.theme_pref = cfg.theme.to_lowercase();
+        self.accent = theme::parse_accent(&cfg.accent);
+        self.applied_dark = None;
+        self.store.set_limits(cfg.max_items, cfg.max_copy_mb);
+        #[cfg(target_os = "macos")]
+        if let Some(t) = self.tray.as_mut() {
+            t.set_glyph(crate::tray::Glyph::parse(&cfg.menu_bar_icon));
+            t.set_hotkey_label(&self.hotkey_label);
+        }
+        if let Ok(mut shared) = self.shared.config.write() {
+            *shared = cfg;
+        }
+        Ok(())
+    }
+
+    /// Shortcut, login item, then `config.json`; earlier steps are undone if a later one fails
+    fn commit_settings(&mut self, saved: &Saved) -> Result<(), String> {
+        let old_hotkey = self.shared.config().hotkey;
+        let was_login = login::is_enabled();
+        if let Some(h) = self.hotkey.as_mut() {
+            h.set(&saved.config.hotkey).map_err(|e| e.to_string())?;
+        }
+        let login_changed = was_login != saved.open_at_login;
+        let result = if login_changed {
+            login::set_enabled(saved.open_at_login)
+                .map_err(|e| format!("Could not change open at login: {e}"))
+        } else {
+            Ok(())
+        };
+        let result = result.and_then(|()| {
+            config::save(&self.dir, &saved.config)
+                .map_err(|e| format!("Could not save settings: {e}"))
+        });
+        if result.is_err() {
+            if let Some(h) = self.hotkey.as_mut() {
+                let _ = h.set(&old_hotkey);
+            }
+            if login_changed {
+                let _ = login::set_enabled(was_login);
+            }
+        }
+        result
     }
 
     // ---------- data ----------
@@ -589,7 +737,8 @@ impl eframe::App for ClipApp {
         if self.reload {
             self.reload_list();
         }
-        if self.shared.visible.load(Ordering::Relaxed) {
+        let dialog_open = self.settings.is_some() || self.confirm_quit;
+        if self.shared.visible.load(Ordering::Relaxed) && !dialog_open {
             self.handle_keys(ctx);
             if self.reload {
                 self.reload_list();
@@ -642,7 +791,7 @@ impl eframe::App for ClipApp {
         self.filters_ui(root, &pal, filters);
         self.list_ui(root, &ctx, &pal, list);
         self.preview_ui(root, &ctx, &pal, preview);
-        self.footer_ui(root, &ctx, &pal, footer);
+        self.footer_ui(root, &pal, footer);
 
         let p = root.painter();
         let line = Stroke::new(1.0, pal.line);
@@ -652,6 +801,8 @@ impl eframe::App for ClipApp {
         p.hline(full.x_range(), footer.top() + 0.5, line);
 
         self.toast_ui(root, &pal, Rect::from_min_max(full.min, footer.right_top()));
+        self.settings_ui(&ctx, &pal);
+        self.quit_ui(&ctx, &pal);
     }
 }
 
@@ -1490,7 +1641,7 @@ impl ClipApp {
         }
     }
 
-    fn footer_ui(&mut self, root: &mut egui::Ui, ctx: &egui::Context, pal: &Palette, rect: Rect) {
+    fn footer_ui(&mut self, root: &mut egui::Ui, pal: &Palette, rect: Rect) {
         root.painter().rect_filled(rect, 0.0, pal.elev);
         let paused = self.shared.paused.load(Ordering::Relaxed);
         let enter = if self.auto_paste { "paste" } else { "copy" };
@@ -1513,35 +1664,15 @@ impl ClipApp {
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
-            let gear = theme::icon_button(ui, pal, Icon::Gear, 26.0, false).on_hover_text("Settings");
-            egui::Popup::menu(&gear).width(220.0).show(|ui| {
-                ui.style_mut().override_font_id = Some(theme::sans(13.0));
-                let pause_label = if paused {
-                    "Resume recording"
-                } else {
-                    "Pause recording"
-                };
-                if ui.button(pause_label).clicked() {
-                    self.set_paused(!paused);
-                }
-                if self.auto_paste && !self.ax_trusted && ui.button("Enable auto-paste…").clicked()
-                {
-                    self.ax_trusted = platform::accessibility_trusted(true);
-                }
-                if ui.button("Clear unpinned history").clicked() {
-                    let _ = self.store.clear_unpinned();
-                    self.reload = true;
-                    self.done("Cleared history. Pinned items kept.");
-                }
-                if ui.button("Open settings file").clicked() {
-                    platform::reveal(&self.config_path);
-                }
-                ui.separator();
-                if ui.button("Quit ClipVault").clicked() {
-                    self.quitting = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            });
+            // right to left: the power button ends up right of the gear
+            let power = theme::icon_button(ui, pal, Icon::Power, 26.0, false);
+            if power.on_hover_text("Quit ClipVault").clicked() {
+                self.confirm_quit = true;
+            }
+            let gear = theme::icon_button(ui, pal, Icon::Gear, 26.0, false);
+            if gear.on_hover_text("Settings").clicked() {
+                self.open_settings();
+            }
             ui.label(
                 RichText::new(format!("{} items", self.counts[0]))
                     .font(theme::sans(12.0))
@@ -1803,7 +1934,7 @@ fn human_size(b: u64) -> String {
     }
 }
 
-fn pretty_hotkey(spec: &str) -> String {
+pub(crate) fn pretty_hotkey(spec: &str) -> String {
     spec.split('+')
         .map(|t| match t.trim().to_lowercase().as_str() {
             "cmd" | "command" | "super" | "meta" => "⌘".to_string(),

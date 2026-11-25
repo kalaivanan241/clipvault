@@ -2,7 +2,9 @@ mod app;
 mod classify;
 mod config;
 mod hotkey;
+mod login;
 mod platform;
+mod settings;
 mod store;
 mod theme;
 #[cfg(target_os = "macos")]

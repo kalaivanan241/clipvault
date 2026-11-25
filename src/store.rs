@@ -179,6 +179,11 @@ impl Store {
         })
     }
 
+    pub fn set_limits(&mut self, max_items: usize, max_copy_mb: u64) {
+        self.max_items = max_items;
+        self.max_copy_bytes = max_copy_mb * 1024 * 1024;
+    }
+
     pub fn image_path(&self, clip: &Clip) -> PathBuf {
         self.dir.join("images").join(&clip.content)
     }

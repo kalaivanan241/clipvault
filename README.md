@@ -141,8 +141,8 @@ granted, Enter only copies the clip and the bottom bar shows an **Enable auto-pa
   - **Files**: one card per file with its status (*Saved in vault*, *Linked · too large to copy*,
     *No longer available*) and **Show in Finder**
 - **Action bar**: where it came from, **Delete ⌘⌫**, **Pin ⌘P**, **Paste ↵**.
-- **Footer**: shortcut hints, item count, and the ⚙︎ menu (pause/resume, clear unpinned history,
-  open the settings file, quit).
+- **Footer**: shortcut hints, item count, the ⚙︎ button (opens Settings) and the ⏻ button
+  (quits after asking you to confirm).
 
 Esc closes the window; ClipVault keeps recording in the background.
 
@@ -156,9 +156,17 @@ Click the ClipVault icon in the menu bar for (the icon dims while recording is p
 
 ## Configuration
 
-Settings live in `~/Library/Application Support/ClipVault/config.json`. It's created on
-first run; edit it and restart ClipVault to apply changes. Options you leave out use the
-defaults.
+Click the **gear icon** in the window's footer to open Settings. Its **Right now** section pauses
+recording, asks for the Accessibility permission auto-paste needs, and clears unpinned history (after
+a confirm); these happen immediately. The rest of the window edits every option below.
+Those changes apply as soon as you click **Save**, with no restart needed. **Esc**
+or **Cancel** discards them, and **Record** captures a new shortcut from the keys you press.
+**Open at login** adds a `~/Library/LaunchAgents/ClipVault.plist` that starts ClipVault when you log in;
+it's kept by macOS, not in `config.json`.
+
+The settings are saved to `~/Library/Application Support/ClipVault/config.json`, created on first
+run. You can also edit that file by hand (**Open settings file** in the Settings window) and
+restart ClipVault. Options you leave out use the defaults.
 
 ```json
 {

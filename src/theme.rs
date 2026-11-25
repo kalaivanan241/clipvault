@@ -289,6 +289,7 @@ pub enum Icon {
     Pin,
     External,
     Gear,
+    Power,
     Check,
     Clipboard,
     Alert,
@@ -401,6 +402,17 @@ pub fn icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32, wid
                     (12.0 + cs * 9.6, 12.0 + sn * 9.6),
                 ]);
             }
+        }
+        Icon::Power => {
+            // a ring open at the top, with a stem through the gap
+            let arc: Vec<(f32, f32)> = (0..=24)
+                .map(|i| {
+                    let a = (-50.0 + i as f32 * 280.0 / 24.0f32).to_radians();
+                    (12.0 + a.cos() * 8.0, 13.0 + a.sin() * 8.0)
+                })
+                .collect();
+            line(&arc);
+            line(&[(12.0, 3.0), (12.0, 11.0)]);
         }
         Icon::Check => line(&[(5.0, 12.0), (10.0, 17.0), (19.0, 7.0)]),
         Icon::Clipboard => {
