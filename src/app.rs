@@ -3,7 +3,8 @@
 //! the "History window" design mockup.
 
 use crate::classify::{self, Group, TextKind, Tok};
-use crate::config::Config;
+use crate::config::{self, Config};
+use crate::settings::{self, Draft, Outcome};
 use crate::store::{now_ms, Clip, FileEntry, Filter, Kind, Store};
 use crate::theme::{self, alpha, ButtonStyle, Icon, Palette};
 use crate::watcher::{self, Shared};
@@ -147,14 +148,17 @@ pub struct ClipApp {
     store: Store,
     shared: Arc<Shared>,
     clipboard: arboard::Clipboard,
-    _hotkey: Option<global_hotkey::GlobalHotKeyManager>,
+    hotkey: Option<hotkey::Hotkey>,
     #[cfg(target_os = "macos")]
     tray: Option<crate::tray::Tray>,
     hotkey_label: String,
     auto_paste: bool,
     /// Accessibility permission (needed for auto-paste), re-checked on show.
     ax_trusted: bool,
+    dir: PathBuf,
     config_path: PathBuf,
+    /// Open while the Settings window is showing
+    settings: Option<Draft>,
 
     theme_pref: String,
     accent: Color32,
@@ -191,20 +195,24 @@ impl ClipApp {
     fn build(cc: &eframe::CreationContext<'_>, dir: PathBuf, cfg: Config) -> Result<ClipApp> {
         theme::install_fonts(&cc.egui_ctx);
         let store = Store::open(&dir, cfg.max_items, cfg.max_copy_mb)?;
-        let shared = Shared::new();
+        let shared = Shared::new(cfg.clone());
         let screenshot = std::env::var_os("CLIPVAULT_SCREENSHOT").map(|p| (PathBuf::from(p), 0));
         // Screenshots show the history as it is, so don't record anything new.
         if screenshot.is_none() {
             let ctx = cc.egui_ctx.clone();
-            watcher::spawn(cfg.clone(), dir.clone(), ctx.clone(), shared.clone());
-            if cfg.ocr {
-                watcher::spawn_ocr(cfg.clone(), dir.clone(), ctx, shared.clone());
-            }
+            watcher::spawn(dir.clone(), ctx.clone(), shared.clone());
+            watcher::spawn_ocr(dir.clone(), ctx, shared.clone());
         }
 
         let mut toast = None;
-        let hotkey = match hotkey::register(&cfg.hotkey, cc.egui_ctx.clone(), shared.clone()) {
-            Ok(m) => Some(m),
+        let hotkey = match hotkey::Hotkey::new(cc.egui_ctx.clone(), shared.clone()) {
+            Ok(mut h) => {
+                if let Err(e) = h.set(&cfg.hotkey) {
+                    eprintln!("{e:#}");
+                    toast = Some((Toast::Warn(format!("{e}")), Instant::now()));
+                }
+                Some(h)
+            }
             Err(e) => {
                 eprintln!("{e:#}");
                 toast = Some((Toast::Warn(format!("{e}")), Instant::now()));
@@ -236,13 +244,15 @@ impl ClipApp {
             store,
             shared,
             clipboard,
-            _hotkey: hotkey,
+            hotkey,
             #[cfg(target_os = "macos")]
             tray,
             hotkey_label,
             auto_paste: cfg.auto_paste,
             ax_trusted: platform::accessibility_trusted(false),
             config_path: dir.join("config.json"),
+            dir,
+            settings: None,
             theme_pref: cfg.theme.to_lowercase(),
             accent: theme::parse_accent(&cfg.accent),
             applied_dark: None,
@@ -297,6 +307,61 @@ impl ClipApp {
             self.applied_dark = Some(dark);
         }
         pal
+    }
+
+    // ---------- settings ----------
+
+    fn settings_ui(&mut self, ctx: &egui::Context, pal: &Palette) {
+        let Some(draft) = self.settings.as_mut() else {
+            return;
+        };
+        match settings::show(ctx, pal, draft) {
+            Outcome::Open => {}
+            Outcome::Cancel => self.settings = None,
+            Outcome::RevealFile => platform::reveal(&self.config_path),
+            Outcome::Save(cfg) => match self.apply_settings(cfg) {
+                Ok(()) => {
+                    self.settings = None;
+                    self.done("Settings saved");
+                }
+                Err(e) => {
+                    if let Some(d) = self.settings.as_mut() {
+                        d.error = Some(e);
+                    }
+                }
+            },
+        }
+    }
+
+    /// Save to `config.json` and apply right away; nothing changes on error
+    fn apply_settings(&mut self, cfg: Config) -> Result<(), String> {
+        let old_hotkey = self.shared.config().hotkey;
+        if let Some(h) = self.hotkey.as_mut() {
+            h.set(&cfg.hotkey).map_err(|e| e.to_string())?;
+        }
+        if let Err(e) = config::save(&self.dir, &cfg) {
+            // Put the previous shortcut back so nothing changes
+            if let Some(h) = self.hotkey.as_mut() {
+                let _ = h.set(&old_hotkey);
+            }
+            return Err(format!("Could not save settings: {e}"));
+        }
+
+        self.hotkey_label = pretty_hotkey(&cfg.hotkey);
+        self.auto_paste = cfg.auto_paste;
+        self.theme_pref = cfg.theme.to_lowercase();
+        self.accent = theme::parse_accent(&cfg.accent);
+        self.applied_dark = None;
+        self.store.set_limits(cfg.max_items, cfg.max_copy_mb);
+        #[cfg(target_os = "macos")]
+        if let Some(t) = self.tray.as_mut() {
+            t.set_glyph(crate::tray::Glyph::parse(&cfg.menu_bar_icon));
+            t.set_hotkey_label(&self.hotkey_label);
+        }
+        if let Ok(mut shared) = self.shared.config.write() {
+            *shared = cfg;
+        }
+        Ok(())
     }
 
     // ---------- data ----------
@@ -589,7 +654,7 @@ impl eframe::App for ClipApp {
         if self.reload {
             self.reload_list();
         }
-        if self.shared.visible.load(Ordering::Relaxed) {
+        if self.shared.visible.load(Ordering::Relaxed) && self.settings.is_none() {
             self.handle_keys(ctx);
             if self.reload {
                 self.reload_list();
@@ -652,6 +717,7 @@ impl eframe::App for ClipApp {
         p.hline(full.x_range(), footer.top() + 0.5, line);
 
         self.toast_ui(root, &pal, Rect::from_min_max(full.min, footer.right_top()));
+        self.settings_ui(&ctx, &pal);
     }
 }
 
@@ -1533,8 +1599,8 @@ impl ClipApp {
                     self.reload = true;
                     self.done("Cleared history. Pinned items kept.");
                 }
-                if ui.button("Open settings file").clicked() {
-                    platform::reveal(&self.config_path);
+                if ui.button("Settings…").clicked() {
+                    self.settings = Some(Draft::new(&self.shared.config()));
                 }
                 ui.separator();
                 if ui.button("Quit ClipVault").clicked() {
@@ -1803,7 +1869,7 @@ fn human_size(b: u64) -> String {
     }
 }
 
-fn pretty_hotkey(spec: &str) -> String {
+pub(crate) fn pretty_hotkey(spec: &str) -> String {
     spec.split('+')
         .map(|t| match t.trim().to_lowercase().as_str() {
             "cmd" | "command" | "super" | "meta" => "⌘".to_string(),

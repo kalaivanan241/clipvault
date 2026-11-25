@@ -1,5 +1,5 @@
 //! User configuration, stored as JSON next to the history database.
-//! Edit `config.json` (see README) and restart the app to apply changes.
+//! Changed from the Settings window (gear icon) or by editing `config.json`
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -64,6 +64,13 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Keep numbers inside the ranges the app can work with
+    pub fn sanitized(mut self) -> Config {
+        self.poll_ms = self.poll_ms.clamp(100, 5000);
+        self.max_items = self.max_items.max(10);
+        self
+    }
+
     pub fn is_ignored(&self, app: &crate::platform::SourceApp) -> bool {
         self.ignore_apps
             .iter()
@@ -82,11 +89,7 @@ pub fn load(dir: &Path) -> Config {
     let path = dir.join("config.json");
     match fs::read_to_string(&path) {
         Ok(s) => match serde_json::from_str::<Config>(&s) {
-            Ok(mut c) => {
-                c.poll_ms = c.poll_ms.clamp(100, 5000);
-                c.max_items = c.max_items.max(10);
-                c
-            }
+            Ok(c) => c.sanitized(),
             Err(e) => {
                 eprintln!("config.json is invalid ({e}); using defaults");
                 Config::default()
@@ -94,10 +97,36 @@ pub fn load(dir: &Path) -> Config {
         },
         Err(_) => {
             let c = Config::default();
-            if let Ok(s) = serde_json::to_string_pretty(&c) {
-                let _ = fs::write(&path, s);
-            }
+            let _ = save(dir, &c);
             c
         }
+    }
+}
+
+pub fn save(dir: &Path, cfg: &Config) -> anyhow::Result<()> {
+    fs::create_dir_all(dir)?;
+    fs::write(dir.join("config.json"), serde_json::to_string_pretty(cfg)?)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saved_settings_load_back_and_are_clamped() {
+        let dir = std::env::temp_dir().join(format!("clipvault-cfg-{}", std::process::id()));
+        let cfg = Config {
+            hotkey: "ctrl+alt+KeyC".to_string(),
+            poll_ms: 1,
+            theme: "light".to_string(),
+            ..Config::default()
+        };
+        save(&dir, &cfg).unwrap();
+        let loaded = load(&dir);
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(loaded.hotkey, "ctrl+alt+KeyC");
+        assert_eq!(loaded.theme, "light");
+        assert_eq!(loaded.poll_ms, 100);
     }
 }

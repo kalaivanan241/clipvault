@@ -10,8 +10,8 @@ use anyhow::{anyhow, Result};
 use eframe::egui;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 /// State shared between the UI thread, watcher thread, hotkey and menu bar.
@@ -31,10 +31,14 @@ pub struct Shared {
     pub just_shown: AtomicBool,
     /// Set by the hotkey/menu bar when the window should be hidden.
     pub hide_requested: AtomicBool,
+    /// Id of the registered global shortcut (0 = none)
+    pub hotkey_id: AtomicU32,
+    /// Current settings; the Settings window replaces them on save
+    pub config: RwLock<Config>,
 }
 
 impl Shared {
-    pub fn new() -> Arc<Shared> {
+    pub fn new(cfg: Config) -> Arc<Shared> {
         Arc::new(Shared {
             version: AtomicU64::new(1),
             skip_until_ms: AtomicI64::new(0),
@@ -43,7 +47,14 @@ impl Shared {
             visible: AtomicBool::new(true),
             just_shown: AtomicBool::new(true),
             hide_requested: AtomicBool::new(false),
+            hotkey_id: AtomicU32::new(0),
+            config: RwLock::new(cfg),
         })
+    }
+
+    /// A copy of the current settings
+    pub fn config(&self) -> Config {
+        self.config.read().map(|c| c.clone()).unwrap_or_default()
     }
 
     /// Bring the window up. Safe to call from any thread.
@@ -125,11 +136,11 @@ fn signature(s: &Snap) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-pub fn spawn(cfg: Config, dir: PathBuf, ctx: egui::Context, shared: Arc<Shared>) {
+pub fn spawn(dir: PathBuf, ctx: egui::Context, shared: Arc<Shared>) {
     std::thread::Builder::new()
         .name("clipboard-watcher".into())
         .spawn(move || {
-            if let Err(e) = run(cfg, dir, ctx, shared) {
+            if let Err(e) = run(dir, ctx, shared) {
                 eprintln!("clipboard watcher stopped: {e:#}");
             }
         })
@@ -137,21 +148,26 @@ pub fn spawn(cfg: Config, dir: PathBuf, ctx: egui::Context, shared: Arc<Shared>)
 }
 
 /// Background thread that reads the text in image clips (new ones as they
-/// arrive, older ones once) with on-device text recognition.
-pub fn spawn_ocr(cfg: Config, dir: PathBuf, ctx: egui::Context, shared: Arc<Shared>) {
+/// arrive, older ones once) with on-device text recognition, while enabled
+pub fn spawn_ocr(dir: PathBuf, ctx: egui::Context, shared: Arc<Shared>) {
     std::thread::Builder::new()
         .name("image-text".into())
         .spawn(move || {
-            if let Err(e) = run_ocr(cfg, dir, ctx, shared) {
+            if let Err(e) = run_ocr(dir, ctx, shared) {
                 eprintln!("image text recognition stopped: {e:#}");
             }
         })
         .expect("failed to start image text recognition");
 }
 
-fn run_ocr(cfg: Config, dir: PathBuf, ctx: egui::Context, shared: Arc<Shared>) -> Result<()> {
+fn run_ocr(dir: PathBuf, ctx: egui::Context, shared: Arc<Shared>) -> Result<()> {
+    let cfg = shared.config();
     let store = Store::open(&dir, cfg.max_items, cfg.max_copy_mb)?;
     loop {
+        if !shared.config().ocr {
+            std::thread::sleep(Duration::from_secs(2));
+            continue;
+        }
         let pending = store.pending_ocr(8)?;
         if pending.is_empty() {
             std::thread::sleep(Duration::from_secs(2));
@@ -167,8 +183,9 @@ fn run_ocr(cfg: Config, dir: PathBuf, ctx: egui::Context, shared: Arc<Shared>) -
     }
 }
 
-fn run(cfg: Config, dir: PathBuf, ctx: egui::Context, shared: Arc<Shared>) -> Result<()> {
-    let store = Store::open(&dir, cfg.max_items, cfg.max_copy_mb)?;
+fn run(dir: PathBuf, ctx: egui::Context, shared: Arc<Shared>) -> Result<()> {
+    let cfg = shared.config();
+    let mut store = Store::open(&dir, cfg.max_items, cfg.max_copy_mb)?;
     let mut cb = arboard::Clipboard::new().map_err(|e| anyhow!("clipboard unavailable: {e}"))?;
     // Starts unset so whatever is on the clipboard at launch is recorded too.
     let mut last_count: Option<i64> = None;
@@ -176,6 +193,9 @@ fn run(cfg: Config, dir: PathBuf, ctx: egui::Context, shared: Arc<Shared>) -> Re
     let mut last_was_image = false;
 
     loop {
+        // Re-read each poll so changes from the Settings window apply right away
+        let cfg = shared.config();
+        store.set_limits(cfg.max_items, cfg.max_copy_mb);
         // Without a change counter images are expensive to re-read, so poll
         // more slowly while one is on the clipboard.
         let wait = if last_was_image {

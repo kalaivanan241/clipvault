@@ -156,9 +156,13 @@ Click the ClipVault icon in the menu bar for (the icon dims while recording is p
 
 ## Configuration
 
-Settings live in `~/Library/Application Support/ClipVault/config.json`. It's created on
-first run; edit it and restart ClipVault to apply changes. Options you leave out use the
-defaults.
+Click the **gear icon** in the window's footer and choose **Settings…** to change every option
+below in a window. Changes apply as soon as you click **Save**, with no restart needed. **Esc**
+or **Cancel** discards them, and **Record** captures a new shortcut from the keys you press.
+
+The settings are saved to `~/Library/Application Support/ClipVault/config.json`, created on first
+run. You can also edit that file by hand (**Open settings file** in the Settings window) and
+restart ClipVault. Options you leave out use the defaults.
 
 ```json
 {
